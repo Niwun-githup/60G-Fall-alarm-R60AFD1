@@ -1,0 +1,188 @@
+substitutions:
+   # change device name to match your desired name
+   device_name: "espresence-mr60fda1-mmwave-sensor"
+   # change sensor name below to the one you want to see in Home Assistant
+   device_name_pretty: ESP mmWave 60 gHz Test
+   # change room name below to the one you want to see in Home Assistant
+   room: ""
+   # change the below to be your WiFi SSID
+   ssid: !secret wifi_ssid
+   # change the below to be your WiFi password
+   wifi_password: !secret wifi_password
+   # UART TX Pin
+   uart_tx_pin: GPIO17
+   # UART RX Pin
+   uart_rx_pin: GPIO16
+   
+
+esphome:
+  name: wroom32-mr60fda1-sensor
+  friendly_name: WROOM32-MR60FDA1-sensor
+  includes:
+    - header/esp-mmwave-60ghz-fda-sensor.h
+  platformio_options:
+    board_build.extra_flags:
+      - "-DARDUINO_USB_CDC_ON_BOOT=0"  # Override, defaults to '-DARDUINO_USB_CDC_ON_BOOT=1'
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  logs:
+    sensor: INFO # reduced logging to minimize web_server target overload..
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "......."
+
+ota:
+  - platform: esphome
+    password: "........."
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  use_address: 000.000.00.00
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "........."
+    password: "......."
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 2
+  include_internal: true
+
+uart:
+  id: uart_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+#  debug:
+#    direction: BOTH
+#    dummy_receiver: false # enabling this, prevents UART byte read in main program, use only for debugging of raw frames and pin assignments prior to including main code class
+#    sequence:
+#      - lambda: UARTDebug::log_hex(direction, bytes, ',');
+
+sensor:
+  - platform: custom
+    lambda: |-
+      auto my_sensor = new UARTSensor(id(uart_bus)); 
+      App.register_component(my_sensor);
+      return {my_sensor->activity_sensor, my_sensor->presence_sensor, my_sensor->motion_sensor, my_sensor->fall_sensor, my_sensor->fall_det_sw, my_sensor->fall_det_sens};
+  
+    sensors:
+      - name: "${room} Activity Level"
+        state_class: measurement
+      - id: presence_sensor
+        name: "internal_presense_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: presence_template
+              state: !lambda return x > 0;
+      - id: motion_sensor
+        name: "internal_motion_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: motion_template
+              state: !lambda return x > 0;
+      - id: fall_sensor
+        name: "internal_fall_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: fall_template
+              state: !lambda return x > 0;
+      - id: fall_det_sw
+        name: "internal_fall_det_sw_to_binary_template"
+        internal: true
+        on_value:
+          - switch.template.publish:
+              id: fall_det_sw_template
+              state: !lambda return x > 0;
+      - id: fall_det_sens
+        name: "internal_fall_det_sens_to_binary_template"
+        internal: true
+
+button:
+  - platform: restart
+    name: "Restart MCU: ${room}"
+    entity_category: diagnostic
+    on_press:
+      - uart.write:
+          id: uart_bus
+          data: "resetSystem 0"
+  - platform: template
+    name: "Reset Radar Module: ${room}"
+    id: reset_radar_module
+    entity_category: diagnostic
+    on_press:
+      - uart.write: [0x53, 0x59, 0x01, 0x02, 0x00, 0x01, 0x0F, 0xBF, 0x54, 0x43]
+
+switch:
+  - platform: template
+    name: Fall Detection Switch
+    id: fall_det_sw_template
+    entity_category: config
+    optimistic: false
+    turn_on_action:
+      - uart.write: [0x53, 0x59, 0x83, 0x00, 0x00, 0x01, 0x01, 0x31, 0x54, 0x43]
+    turn_off_action:
+      - uart.write: [0x53, 0x59, 0x83, 0x00, 0x00, 0x01, 0x00, 0x30, 0x54, 0x43]
+
+number:
+  - platform: template
+    name: Fall Detection Sensitivity
+    id: fall_det_sens_template
+    entity_category: config
+    min_value: 0
+    max_value: 3
+    lambda: |-
+      return id(fall_det_sens).state;
+    step: 1
+    set_action:
+    - if:
+        condition:
+          lambda: 'return (int)x == 0.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x00, 0x3D, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 1.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x01, 0x3E, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 2.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x02, 0x3F, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 3.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x03, 0x40, 0x54, 0x43]
+
+binary_sensor:
+  - platform: template
+    id: presence_template
+    name: "${room} Presence"
+    device_class: occupancy
+    filters:
+      - delayed_off: 2s
+  - platform: template
+    id: motion_template
+    name: "${room} Motion"
+    device_class: motion
+  - platform: template
+    id: fall_template
+    name: "${room} Fall Detection"
+    device_class: safety    
