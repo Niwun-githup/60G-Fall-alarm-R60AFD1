@@ -1,0 +1,277 @@
+substitutions:
+   # change device name to match your desired name
+   device_name: "espresence-mr60fda1-mmwave-sensor"
+   # change sensor name below to the one you want to see in Home Assistant
+   device_name_pretty: ESP mmWave 60 gHz Test
+   # change room name below to the one you want to see in Home Assistant
+   room: ""
+   # change the below to be your WiFi SSID
+   ssid: !secret wifi_ssid
+   # change the below to be your WiFi password
+   wifi_password: !secret wifi_password
+   # UART TX Pin
+   uart_tx_pin: GPIO17
+   # UART RX Pin
+   uart_rx_pin: GPIO16
+   
+esphome:
+  name: espc6-mr60fda1-mmwave-sensor
+  friendly_name: espC6-mr60fda1-mmwave-sensor
+  includes:
+    - header/esp-mmwave-60ghz-fda-sensor.h
+  platformio_options:
+    board_build.extra_flags:
+      - "-DARDUINO_USB_CDC_ON_BOOT=0"
+
+esp32:
+  board: esp32-c6-devkitm-1
+  flash_size: 4MB
+  variant: esp32c6
+  framework:
+    type: esp-idf
+    version: "5.3.0"
+    platform_version: 6.8.1
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHSIZE_4MB: y
+
+logger:
+  logs:
+    sensor: INFO
+
+api:
+  encryption:
+    key: "s7KVc8vsBuqEkqKXu7GSeYVndW3Yld4q3yK4ujgDQ44="
+
+ota:
+  - platform: esphome
+    password: "4b36dd989d49b808da70a867b4eb7d4e"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  use_address: 192.168.1.58
+
+  ap:
+    ssid: "Espc6-Mr60Fda1-Mmwave-Sensor"
+    password: "Kt5Vpwt0eRVm"
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 2
+  include_internal: true
+
+http_request:
+  useragent: esphome/espc6-mr60fda1-mmwave-sensor.yaml
+  timeout: 10s
+  verify_ssl: false  # เพิ่มบรรทัดนี้เพื่อข้ามการตรวจสอบใบรับรอง SSL
+
+uart:
+  id: uart_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+  debug:
+    direction: BOTH
+    dummy_receiver: false
+#  debug:
+#    direction: BOTH
+#    dummy_receiver: false # enabling this, prevents UART byte read in main program, use only for debugging of raw frames and pin assignments prior to including main code class
+#    sequence:
+#      - lambda: UARTDebug::log_hex(direction, bytes, ',');
+
+sensor:
+  - platform: custom
+    lambda: |-
+      auto my_sensor = new UARTSensor(id(uart_bus)); 
+      App.register_component(my_sensor);
+      return {my_sensor->activity_sensor, my_sensor->presence_sensor, my_sensor->motion_sensor, my_sensor->fall_sensor, my_sensor->fall_det_sw, my_sensor->fall_det_sens, my_sensor->stationary_residence_sensor};
+  
+    sensors:
+      - name: "${room} Activity Level"
+        state_class: measurement
+      - id: presence_sensor
+        name: "internal_presense_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: presence_template
+              state: !lambda return x > 0;
+      - id: motion_sensor
+        name: "internal_motion_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: motion_template
+              state: !lambda return x > 0;
+      - id: fall_sensor
+        name: "internal_fall_sensor_to_binary_template"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: fall_template
+              state: !lambda return x > 0;
+      - id: fall_det_sw
+        name: "internal_fall_det_sw_to_binary_template"
+        internal: true
+        on_value:
+          - switch.template.publish:
+              id: fall_det_sw_template
+              state: !lambda return x > 0;
+      - id: fall_det_sens
+        name: "internal_fall_det_sens_to_binary_template"
+        internal: true
+      - id: stationary_residence_sensor
+        name: "${room} Stationary Residence"
+        internal: true
+        on_value:
+          - binary_sensor.template.publish:
+              id: stationary_residence_template
+              state: !lambda return x > 0;
+
+      
+button:
+  - platform: restart
+    name: "Restart MCU: ${room}"
+    entity_category: diagnostic
+    on_press:
+      - uart.write:
+          id: uart_bus
+          data: "resetSystem 0"
+  - platform: template
+    name: "Reset Radar Module: ${room}"
+    id: reset_radar_module
+    entity_category: diagnostic
+    on_press:
+      - uart.write: [0x53, 0x59, 0x01, 0x02, 0x00, 0x01, 0x0F, 0xBF, 0x54, 0x43]
+
+switch:
+  - platform: template
+    name: Fall Detection Switch
+    id: fall_det_sw_template
+    entity_category: config
+    optimistic: false
+    turn_on_action:
+      - uart.write: [0x53, 0x59, 0x83, 0x00, 0x00, 0x01, 0x01, 0x31, 0x54, 0x43]
+    turn_off_action:
+      - uart.write: [0x53, 0x59, 0x83, 0x00, 0x00, 0x01, 0x00, 0x30, 0x54, 0x43]
+
+  - platform: template
+    name: Query Switch
+    id: residence_query_switch
+    entity_category: config
+    turn_on_action:
+      - lambda: |-
+          // Query residence switch
+          std::vector<uint8_t> command = {0x53, 0x59, 0x83, 0x8D, 0x00, 0x01, 0x0F, 0xD4, 0x54, 0x43};  // คำนวณ sum = 0xD4
+          id(uart_bus).write_array(command.data(), command.size());
+
+number:
+  - platform: template
+    name: Fall Detection Sensitivity
+    id: fall_det_sens_template
+    entity_category: config
+    min_value: 0
+    max_value: 3
+    lambda: |-
+      return id(fall_det_sens).state;
+    step: 1
+    set_action:
+    - if:
+        condition:
+          lambda: 'return (int)x == 0.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x00, 0x3D, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 1.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x01, 0x3E, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 2.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x02, 0x3F, 0x54, 0x43]
+    - if:
+        condition:
+          lambda: 'return (int)x == 3.000000;'
+        then:
+          - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x03, 0x40, 0x54, 0x43]
+
+  - platform: template
+    name: "Fall Time Setting"
+    id: fall_time_setting
+    entity_category: config
+    min_value: 5
+    max_value: 180
+    step: 1
+    lambda: |-
+      return id(fall_time_setting).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;  // High byte of time
+            uint8_t time_seconds_low = time_seconds & 0xFF;  // Low byte of time
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0C, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
+  - platform: template
+    name: "Height accumulation time"
+    id: height_accumulation_time
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+    lambda: |-
+      return id(height_accumulation_time).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;  // High byte of time
+            uint8_t time_seconds_low = time_seconds & 0xFF;  // Low byte of time
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0f, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
+  - platform: template
+    name: "Residence Time"
+    id: residence_time_template
+    entity_category: config
+    min_value: 60
+    max_value: 3600
+    step: 60
+    lambda: |-
+      return id(residence_time_template).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;
+            uint8_t time_seconds_low = time_seconds & 0xFF;
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0A, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
+binary_sensor:
+  - platform: template
+    id: presence_template
+    name: "${room} Presence"
+    device_class: occupancy
+    filters:
+      - delayed_off: 2s
+  - platform: template
+    id: motion_template
+    name: "${room} Motion"
+    device_class: motion
+  - platform: template
+    id: fall_template
+    name: "${room} Fall Detection"
+    device_class: safety
+  - platform: template
+    id: stationary_residence_template
+    name: "${room} Stationary Residence"
+    device_class: occupancy
