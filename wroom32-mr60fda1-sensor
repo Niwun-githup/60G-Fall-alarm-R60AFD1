@@ -55,16 +55,17 @@ wifi:
 
 captive_portal:
 
-web_server:
-  port: 80
-  version: 2
-  include_internal: true
-
 uart:
   id: uart_bus
   tx_pin: GPIO17
   rx_pin: GPIO16
   baud_rate: 115200
+  debug:
+    direction: BOTH
+    dummy_receiver: false
+    # เปิดการ debug เพื่อตรวจสอบข้อมูลที่ส่งออกมาจาก UART
+    sequence:
+      - lambda: UARTDebug::log_hex(direction, bytes, ',');
 #  debug:
 #    direction: BOTH
 #    dummy_receiver: false # enabling this, prevents UART byte read in main program, use only for debugging of raw frames and pin assignments prior to including main code class
@@ -76,11 +77,20 @@ sensor:
     lambda: |-
       auto my_sensor = new UARTSensor(id(uart_bus)); 
       App.register_component(my_sensor);
-      return {my_sensor->activity_sensor, my_sensor->presence_sensor, my_sensor->motion_sensor, my_sensor->fall_sensor, my_sensor->fall_det_sw, my_sensor->fall_det_sens};
+      return {my_sensor->activity_sensor, my_sensor->presence_sensor, my_sensor->motion_sensor, my_sensor->fall_sensor, my_sensor->fall_det_sw, my_sensor->fall_det_sens, my_sensor->stationary_residence_sensor};
   
     sensors:
-      - name: "${room} Activity Level"
+      - id: activity_level
+        name: "${room} Activity Level"
         state_class: measurement
+        on_value:
+          - lambda: |-
+              if (x > 40) {
+                id(fall_template).publish_state(true); // Problem
+              } else {
+                id(fall_template).publish_state(false); // Safe
+              }
+             
       - id: presence_sensor
         name: "internal_presense_sensor_to_binary_template"
         internal: true
@@ -112,7 +122,18 @@ sensor:
       - id: fall_det_sens
         name: "internal_fall_det_sens_to_binary_template"
         internal: true
-
+      - id: stationary_residence_sensor
+        name: "Stationary Residence Raw"
+        on_value: 
+          - lambda: |-
+              if ((int)x == 0x00) {
+                ESP_LOGI("custom", "No stationary residency detected.");
+                id(stationary_residence_template).publish_state(false);
+              } else if ((int)x == 0x01) {
+                ESP_LOGI("custom", "Stationary residency detected.");
+                id(stationary_residence_template).publish_state(true);
+              }
+        
 button:
   - platform: restart
     name: "Restart MCU: ${room}"
@@ -139,6 +160,18 @@ switch:
     turn_off_action:
       - uart.write: [0x53, 0x59, 0x83, 0x00, 0x00, 0x01, 0x00, 0x30, 0x54, 0x43]
 
+  - platform: template
+    name: "Residence Switch"
+    id: residence_switch_sensor
+    entity_category: config
+    turn_on_action: 
+      - uart.write: [0x53, 0x59, 0x83, 0x0B, 0x00, 0x01, 0x01, 0x54, 0x43]  # คำสั่งเปิด
+    turn_off_action:
+      - uart.write: [0x53, 0x59, 0x83, 0x0B, 0x00, 0x01, 0x00, 0x54, 0x43]  # คำสั่งปิด
+    optimistic: false  # ป้องกันการตั้งสถานะเอง
+    assumed_state: false
+  
+          
 number:
   - platform: template
     name: Fall Detection Sensitivity
@@ -171,6 +204,63 @@ number:
         then:
           - uart.write: [0x53, 0x59, 0x83, 0x0D, 0x00, 0x01, 0x03, 0x40, 0x54, 0x43]
 
+  - platform: template
+    name: "Fall Time Setting"
+    id: fall_time_setting
+    entity_category: config
+    min_value: 5
+    max_value: 180
+    step: 1
+    lambda: |-
+      return id(fall_time_setting).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;  // High byte of time
+            uint8_t time_seconds_low = time_seconds & 0xFF;  // Low byte of time
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0C, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
+  - platform: template
+    name: "Height accumulation time"
+    id: height_accumulation_time
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+    lambda: |-
+      return id(height_accumulation_time).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;  // High byte of time
+            uint8_t time_seconds_low = time_seconds & 0xFF;  // Low byte of time
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0f, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
+  - platform: template
+    name: "Residence Time"
+    id: residence_time_template
+    entity_category: config
+    min_value: 60
+    max_value: 3600
+    step: 60
+    lambda: |-
+      return id(residence_time_template).state;
+    set_action:
+      - uart.write:
+          id: uart_bus
+          data: !lambda |-
+            int time_seconds = (int)x;
+            uint8_t time_seconds_high = time_seconds >> 8;
+            uint8_t time_seconds_low = time_seconds & 0xFF;
+            std::vector<uint8_t> data = {0x53, 0x59, 0x83, 0x0A, 0x00, 0x04, 0x4B, time_seconds_high, time_seconds_low, 0x54, 0x43};
+            return data;
+
 binary_sensor:
   - platform: template
     id: presence_template
@@ -185,4 +275,12 @@ binary_sensor:
   - platform: template
     id: fall_template
     name: "${room} Fall Detection"
-    device_class: safety    
+    device_class: safety
+    filters:
+      - delayed_off: 20s
+  - platform: template
+    id: stationary_residence_template
+    name: "${room} Stationary Residence"
+    device_class: occupancy
+    filters:
+      - delayed_off: 2s  # ใช้กรองเวลาออก (optional) สำหรับการดีเลย์
